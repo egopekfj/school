@@ -1,1970 +1,512 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import ttk, messagebox, filedialog
 import json
 import random
 import copy
 import os
 from datetime import datetime
 
-
-# ============================================================
-# Файл статистики
-# ============================================================
-STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_statistics.json")
-
-
-# ============================================================
-# Режимы проверки письменных ответов
-# ============================================================
-CHECK_MODE_DISPLAY = {
-    "exact": "Точное совпадение",
-    "contains": "Содержит правильный ответ",
-    "letter": "Только пропущенная буква"
-}
-
-CHECK_MODE_INTERNAL = {v: k for k, v in CHECK_MODE_DISPLAY.items()}
-
-
-# ============================================================
-# Вспомогательные функции
-# ============================================================
-def safe_float(value, default=0.0):
-    """Безопасное преобразование в float."""
-    if value is None:
-        return default
-
-    try:
-        if isinstance(value, str):
-            value = value.replace(",", ".")
-        return float(value)
-    except Exception:
-        return default
-
-
-def format_number(value):
-    """Красивый вывод чисел: 5 вместо 5.0, 2.5 вместо 2.50."""
-    if value is None:
-        return ""
-
-    try:
-        x = float(value)
-    except Exception:
-        return str(value)
-
-    if x.is_integer():
-        return str(int(x))
-
-    return f"{x:.2f}".rstrip("0").rstrip(".")
-
-
-def load_statistics():
-    """Загрузка статистики из JSON-файла."""
-    if not os.path.exists(STATS_FILE):
-        return []
-
-    try:
-        with open(STATS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def save_statistics(stats):
-    """Сохранение статистики в JSON-файл."""
-    with open(STATS_FILE, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
-
-
-def append_statistics(record):
-    """Добавление одной записи в статистику."""
-    stats = load_statistics()
-    stats.append(record)
-    save_statistics(stats)
-
-
-def normalize_answer(text):
-    """
-    Нормализация ответа для сравнения.
-    Пример: "  Москва! " -> "москва"
-    """
-    if not isinstance(text, str):
-        text = str(text)
-
-    text = text.strip().lower().replace("ё", "е")
-
-    # Убираем часть знаков препинания
-    for ch in ".,!?;:()[]{}\"'«»":
-        text = text.replace(ch, "")
-
-    # Убираем лишние пробелы
-    text = " ".join(text.split())
-
-    return text
-
-
-def get_answers_list(q):
-    """Получает список правильных ответов из вопроса."""
-    answers = q.get("answers", [])
-
-    if isinstance(answers, str):
-        answers = [
-            ans.strip()
-            for ans in answers.split(";")
-            if ans.strip()
-        ]
-
-    elif isinstance(answers, list):
-        answers = [
-            str(ans).strip()
-            for ans in answers
-            if str(ans).strip()
-        ]
-
-    else:
-        answers = []
-
-    # Поддержка возможного старого поля correct_text
-    if not answers and q.get("correct_text"):
-        raw = str(q.get("correct_text"))
-        answers = [
-            ans.strip()
-            for ans in raw.split(";")
-            if ans.strip()
-        ]
-
-    return answers
-
-
-def contains_correct_answer(user_answer, accepted_answers):
-    """
-    Проверяет, содержит ли ответ ученика правильный ответ.
-    Если правильный ответ - одно слово, ищем как отдельное слово.
-    Если правильный ответ - фраза, ищем как подстроку.
-    """
-    user_norm = normalize_answer(user_answer)
-
-    if not user_norm:
-        return False
-
-    user_tokens = set(user_norm.split())
-
-    for accepted in accepted_answers:
-        acc_norm = normalize_answer(accepted)
-
-        if not acc_norm:
-            continue
-
-        if " " in acc_norm:
-            # Фраза
-            if acc_norm in user_norm:
-                return True
-        else:
-            # Одно слово / буква / число
-            if acc_norm in user_tokens:
-                return True
-
-    return False
-
-
-def contains_any_correct_word(user_answer, accepted_answers):
-    """
-    Проверяет, есть ли в ответе ученика хотя бы одно правильное слово
-    из правильных ответов.
-    Используется для частичного балла.
-    """
-    user_norm = normalize_answer(user_answer)
-    user_tokens = set(user_norm.split())
-
-    if not user_tokens:
-        return False
-
-    for accepted in accepted_answers:
-        acc_norm = normalize_answer(accepted)
-
-        if not acc_norm:
-            continue
-
-        for token in acc_norm.split():
-            if token and token in user_tokens:
-                return True
-
-    return False
-
-
-def extract_letters(text):
-    """Извлекает буквы из текста после нормализации."""
-    return [ch for ch in normalize_answer(text) if ch.isalpha()]
-
-
-def letter_answer_is_correct(user_answer, accepted_answers):
-    """
-    Режим 'Только пропущенная буква'.
-    Полный балл, если введена ровно одна правильная буква.
-    """
-    user_letters = extract_letters(user_answer)
-
-    # Требуем именно отдельную букву
-    if len(user_letters) != 1:
-        return False
-
-    user_letter = user_letters[0]
-
-    for accepted in accepted_answers:
-        acc_letters = extract_letters(accepted)
-
-        if not acc_letters:
-            continue
-
-        # Если учитель случайно написал слово, берём первую букву
-        if user_letter == acc_letters[0]:
-            return True
-
-    return False
-
-
-def letter_answer_contains(user_answer, accepted_answers):
-    """
-    Частичная проверка для буквы:
-    правильная буква где-то встречается в ответе ученика.
-    """
-    user_letters = set(extract_letters(user_answer))
-
-    if not user_letters:
-        return False
-
-    for accepted in accepted_answers:
-        acc_letters = extract_letters(accepted)
-
-        if not acc_letters:
-            continue
-
-        if acc_letters[0] in user_letters:
-            return True
-
-    return False
-
-
-def exact_answer_is_correct(user_answer, accepted_answers):
-    """Точное совпадение ответа ученика с одним из правильных ответов."""
-    user_norm = normalize_answer(user_answer)
-
-    if not user_norm:
-        return False
-
-    for accepted in accepted_answers:
-        if user_norm == normalize_answer(accepted):
-            return True
-
-    return False
-
-
-def get_question_max_points(q):
-    """Максимальный балл за вопрос."""
-    if q.get("type") == "text":
-        points = safe_float(q.get("full_points", 1.0), 1.0)
-        return max(0.0, points)
-
-    # Обычный вопрос с выбором ответа
-    return 1.0
-
-
-def score_text_question(q, user_answer):
-    """Подсчёт баллов за письменный вопрос."""
-    answers = get_answers_list(q)
-
-    full_points = safe_float(q.get("full_points", 1.0), 1.0)
-    partial_points = safe_float(q.get("partial_points", 0.0), 0.0)
-
-    if full_points < 0:
-        full_points = 0.0
-
-    if partial_points < 0:
-        partial_points = 0.0
-
-    if partial_points > full_points:
-        partial_points = full_points
-
-    if not user_answer or not str(user_answer).strip():
-        return 0.0
-
-    mode = q.get("check_mode", "exact")
-
-    # Режим: содержит правильный ответ
-    if mode == "contains":
-        if contains_correct_answer(user_answer, answers):
-            return full_points
-
-        if partial_points > 0 and contains_any_correct_word(user_answer, answers):
-            return partial_points
-
-        return 0.0
-
-    # Режим: только пропущенная буква
-    if mode == "letter":
-        if letter_answer_is_correct(user_answer, answers):
-            return full_points
-
-        if partial_points > 0 and letter_answer_contains(user_answer, answers):
-            return partial_points
-
-        return 0.0
-
-    # Режим: точное совпадение
-    if exact_answer_is_correct(user_answer, answers):
-        return full_points
-
-    if partial_points > 0 and contains_any_correct_word(user_answer, answers):
-        return partial_points
-
-    return 0.0
-
-
-# ============================================================
-# Главное окно
-# ============================================================
 class TestApp:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("📚 Школьный Тест-Приложение")
-        self.root.geometry("560x480")
-        self.root.resizable(False, False)
-        self.setup_menu()
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Система тестирования")
+        self.root.geometry("900x650")
+        
+        # Настройка полноэкранного режима
+        self.is_fullscreen = False
+        self.root.bind("<F11>", self.toggle_fullscreen)
+        self.setup_context_menu()
 
-    def setup_menu(self):
-        for w in self.root.winfo_children():
-            w.destroy()
-
-        tk.Label(
-            self.root,
-            text="Выберите режим работы:",
-            font=("Segoe UI", 18, "bold")
-        ).pack(pady=(40, 10))
-
-        tk.Button(
-            self.root,
-            text="👨‍🏫 Конструктор тестов (Учитель)",
-            command=self.open_teacher,
-            height=2,
-            font=("Segoe UI", 13),
-            bg="#4361ee",
-            fg="white",
-            relief="flat"
-        ).pack(pady=10, padx=50, fill="x")
-
-        tk.Button(
-            self.root,
-            text="🎓 Пройти тест (Ученик)",
-            command=self.open_student,
-            height=2,
-            font=("Segoe UI", 13),
-            bg="#2a9d8f",
-            fg="white",
-            relief="flat"
-        ).pack(pady=10, padx=50, fill="x")
-
-        tk.Button(
-            self.root,
-            text="📊 Статистика",
-            command=self.open_statistics,
-            height=2,
-            font=("Segoe UI", 13),
-            bg="#f4a261",
-            fg="white",
-            relief="flat"
-        ).pack(pady=10, padx=50, fill="x")
-
-        tk.Label(
-            self.root,
-            text="Оффлайн • Таймер • Выбор ответа • Письменный ответ • Частичный балл • Статистика",
-            fg="gray",
-            font=("Segoe UI", 9)
-        ).pack(pady=20)
-
-    def open_teacher(self):
-        TeacherWindow(self.root)
-
-    def open_student(self):
-        StudentWindow(self.root)
-
-    def open_statistics(self):
-        StatsWindow(self.root)
-
-
-# ============================================================
-# Окно учителя
-# ============================================================
-class TeacherWindow(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("🛠 Конструктор тестов")
-        self.geometry("920x900")
-        self.resizable(True, True)
-        self.transient(parent)
-        self.grab_set()
-        self.lift()
-
+        # Данные теста
         self.test_data = {
             "title": "Новый тест",
-            "take_questions": 5,
-            "grading": {
-                "5": 18,
-                "4": 14,
-                "3": 9,
-                "2": 0
-            },
+            "questions_to_show": 5,
+            "grades": {"5": 90, "4": 75, "3": 50},
             "questions": []
         }
+        
+        # Переменные прохождения
+        self.current_student = {}
+        self.active_questions = []
+        self.current_q_index = 0
+        self.student_answers = []
+        self.time_left = 0
+        self.timer_id = None
 
-        self.selected_idx = None
-        self.editing_idx = None
-        self.setup_ui()
+        self.create_main_menu()
 
-    def setup_ui(self):
-        main = tk.Frame(self, padx=15, pady=10)
-        main.pack(fill=tk.BOTH, expand=True)
+    def enable_copy_paste(self, widget):
+        """Включает горячие клавиши CTRL+C, CTRL+V, CTRL+A, CTRL+X"""
+        def select_all(event):
+            widget.select_range(0, tk.END)
+            return 'break'
 
-        # 1. Название теста
-        tk.Label(
-            main,
-            text="Название теста:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w")
+        widget.bind("<Control-c>", lambda e: widget.event_generate("<<Copy>>"))
+        widget.bind("<Control-v>", lambda e: widget.event_generate("<<Paste>>"))
+        widget.bind("<Control-x>", lambda e: widget.event_generate("<<Cut>>"))
+        if isinstance(widget, tk.Entry):
+            widget.bind("<Control-a>", select_all)
 
-        self.ent_title = tk.Entry(main, font=("Segoe UI", 11))
-        self.ent_title.pack(fill="x", pady=(0, 6))
-        self.ent_title.insert(0, "Контрольная работа")
+    def setup_context_menu(self):
+        """Контекстное меню мыши для вставки/копирования"""
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Копировать", command=lambda: self.root.focus_get().event_generate("<<Copy>>"))
+        self.context_menu.add_command(label="Вставить", command=lambda: self.root.focus_get().event_generate("<<Paste>>"))
+        self.context_menu.add_command(label="Вырезать", command=lambda: self.root.focus_get().event_generate("<<Cut>>"))
 
-        # 2. Сколько вопросов выдавать ученику
-        tk.Label(
-            main,
-            text="Количество вопросов в варианте (из общего пула):",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w")
+        self.root.bind_class("Entry", "<Button-3>", self.show_context_menu)
+        self.root.bind_class("Text", "<Button-3>", self.show_context_menu)
 
-        self.ent_take = tk.Entry(main, width=6, font=("Segoe UI", 11))
-        self.ent_take.pack(anchor="w", pady=(0, 8))
-        self.ent_take.insert(0, str(self.test_data["take_questions"]))
+    def show_context_menu(self, event):
+        self.context_menu.post(event.x_root, event.y_root)
 
-        tk.Label(
-            main,
-            text="💡 При каждом запуске ученик получит случайные вопросы из вашего пула",
-            fg="#666",
-            font=("Segoe UI", 9)
-        ).pack(anchor="w", pady=(0, 6))
+    def toggle_fullscreen(self, event=None):
+        self.is_fullscreen = not self.is_fullscreen
+        self.root.attributes("-fullscreen", self.is_fullscreen)
 
-        # 3. Критерии оценок
-        tk.Label(
-            main,
-            text="Мин. баллов для оценок (5 / 4 / 3 / 2):",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w")
+    def clear_screen(self):
+        if self.timer_id:
+            self.root.after_cancel(self.timer_id)
+            self.timer_id = None
+        for widget in self.root.winfo_children():
+            widget.destroy()
 
-        grade_frame = tk.Frame(main)
-        grade_frame.pack(fill="x", pady=(0, 8))
+    def create_top_bar(self, parent):
+        top_frame = ttk.Frame(parent)
+        top_frame.pack(fill=tk.X, pady=5, px=10)
+        fs_btn = ttk.Button(top_frame, text="🔲 На весь экран (F11)", command=self.toggle_fullscreen)
+        fs_btn.pack(side=tk.RIGHT)
+        return top_frame
 
-        self.grade_ents = {}
+    # --- Главное меню ---
+    def create_main_menu(self):
+        self.clear_screen()
+        
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(expand=True, fill=tk.BOTH)
 
-        for g in ["5", "4", "3", "2"]:
-            f = tk.Frame(grade_frame)
-            f.pack(side="left", padx=8)
+        self.create_top_bar(main_frame)
 
-            tk.Label(f, text=f"{g}:").pack(side="left")
+        ttk.Label(main_frame, text="Система тестирования", font=("Arial", 22, "bold")).pack(pady=20)
 
-            self.grade_ents[g] = tk.Entry(f, width=5, font=("Segoe UI", 11))
-            self.grade_ents[g].pack(side="left")
-            self.grade_ents[g].insert(0, str(self.test_data["grading"][g]))
+        btn_style = {'width': 35, 'padding': 10}
+        
+        ttk.Button(main_frame, text="🎓 Пройти тест (Ученик)", command=self.start_student_mode, **btn_style).pack(pady=10)
+        ttk.Button(main_frame, text="👨‍🏫 Конструктор тестов (Учитель)", command=self.start_teacher_mode, **btn_style).pack(pady=10)
+        ttk.Button(main_frame, text="📊 Статистика", command=self.show_statistics, **btn_style).pack(pady=10)
+        ttk.Button(main_frame, text="Выход", command=self.root.quit, **btn_style).pack(pady=10)
 
-        # 4. Текст вопроса
-        tk.Label(
-            main,
-            text="Текст вопроса:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w")
+    # --- Конструктор тестов ---
+    def start_teacher_mode(self):
+        self.clear_screen()
+        
+        main_frame = ttk.Frame(self.root, padding=15)
+        main_frame.pack(expand=True, fill=tk.BOTH)
 
-        self.ent_q = tk.Text(main, height=3, font=("Segoe UI", 11))
-        self.ent_q.pack(fill="x", pady=(0, 6))
+        self.create_top_bar(main_frame)
 
-        # 5. Тип вопроса
-        type_frame = tk.Frame(main)
-        type_frame.pack(fill="x", pady=(0, 6))
+        # Шапка
+        top_bar = ttk.Frame(main_frame)
+        top_bar.pack(fill=tk.X, pady=5)
+        ttk.Button(top_bar, text="⬅ Главное меню", command=self.create_main_menu).pack(side=tk.LEFT)
+        ttk.Button(top_bar, text="💾 Сохранить тест в JSON", command=self.save_test_file).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(top_bar, text="📂 Загрузить тест из JSON", command=self.load_test_file).pack(side=tk.RIGHT)
 
-        tk.Label(
-            type_frame,
-            text="Тип вопроса:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="left")
+        # Настройки теста
+        settings_frame = ttk.LabelFrame(main_frame, text="Настройки теста", padding=10)
+        settings_frame.pack(fill=tk.X, pady=5)
 
-        self.qtype_var = tk.StringVar(value="Выбор ответа")
+        ttk.Label(settings_frame, text="Название:").grid(row=0, column=0, sticky=tk.W)
+        self.title_entry = ttk.Entry(settings_frame, width=40)
+        self.title_entry.insert(0, self.test_data.get("title", "Новый тест"))
+        self.title_entry.grid(row=0, column=1, padx=5)
+        self.enable_copy_paste(self.title_entry)
 
-        self.type_combo = ttk.Combobox(
-            type_frame,
-            textvariable=self.qtype_var,
-            values=["Выбор ответа", "Письменный ответ"],
-            state="readonly",
-            width=25
-        )
-        self.type_combo.pack(side="left", padx=10)
-        self.type_combo.bind("<<ComboboxSelected>>", self.on_qtype_change)
+        ttk.Label(settings_frame, text="Вопросов ученику:").grid(row=0, column=2, sticky=tk.W, padx=5)
+        self.q_count_entry = ttk.Entry(settings_frame, width=5)
+        self.q_count_entry.insert(0, str(self.test_data.get("questions_to_show", 5)))
+        self.q_count_entry.grid(row=0, column=3)
+        self.enable_copy_paste(self.q_count_entry)
 
-        # 6. Динамическая область: выбор ответа или письменный ответ
-        self.dynamic_frame = tk.Frame(main)
-        self.dynamic_frame.pack(fill="x", pady=(0, 6))
-        self.dynamic_frame.columnconfigure(0, weight=1)
+        # Форма добавления вопроса
+        q_frame = ttk.LabelFrame(main_frame, text="Добавить / Редактировать вопрос", padding=10)
+        q_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        # Блок для вопроса с выбором ответа
-        self.choice_container = tk.Frame(self.dynamic_frame)
-        self.choice_container.grid(row=0, column=0, sticky="ew")
+        ttk.Label(q_frame, text="Текст вопроса:").pack(anchor=tk.W)
+        self.q_text = tk.Text(q_frame, height=3, width=70)
+        self.q_text.pack(fill=tk.X, pady=2)
+        self.enable_copy_paste(self.q_text)
 
-        tk.Label(
-            self.choice_container,
-            text="Варианты ответов:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w")
+        ttk.Label(q_frame, text="Время на вопрос (сек):").pack(anchor=tk.W)
+        self.q_time_entry = ttk.Entry(q_frame, width=10)
+        self.q_time_entry.insert(0, "60")
+        self.q_time_entry.pack(anchor=tk.W, pady=2)
+        self.enable_copy_paste(self.q_time_entry)
 
-        opts_frame = tk.Frame(self.choice_container)
-        opts_frame.pack(fill="x", pady=(0, 6))
+        # Тип вопроса
+        self.q_type_var = tk.StringVar(value="choice")
+        type_frame = ttk.Frame(q_frame)
+        type_frame.pack(fill=tk.X, pady=5)
+        ttk.Radiobutton(type_frame, text="Выбор ответа", variable=self.q_type_var, value="choice", command=self.toggle_q_type).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(type_frame, text="Письменный ответ", variable=self.q_type_var, value="text", command=self.toggle_q_type).pack(side=tk.LEFT, padx=5)
 
-        self.opt_ents = [tk.Entry(opts_frame, font=("Segoe UI", 11)) for _ in range(4)]
+        # Контейнер для вариантов или текста
+        self.answers_container = ttk.Frame(q_frame)
+        self.answers_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.setup_choice_ui()
 
-        for i, e in enumerate(self.opt_ents):
-            e.pack(side="left", fill="x", expand=True, padx=(0, 5))
-            e.insert(0, f"Вариант {i + 1}")
+        ttk.Button(q_frame, text="➕ Добавить вопрос в тест", command=self.add_question).pack(pady=5)
 
-        choice_correct_frame = tk.Frame(self.choice_container)
-        choice_correct_frame.pack(fill="x")
-
-        tk.Label(
-            choice_correct_frame,
-            text="Правильный ответ:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="left")
-
-        self.correct_var = tk.StringVar(value="1")
-        tk.OptionMenu(
-            choice_correct_frame,
-            self.correct_var,
-            "1", "2", "3", "4"
-        ).pack(side="left", padx=5)
-
-        # Блок для письменного ответа
-        self.text_container = tk.Frame(self.dynamic_frame)
-        self.text_container.grid(row=0, column=0, sticky="ew")
-        self.text_container.grid_remove()
-
-        tk.Label(
-            self.text_container,
-            text="Правильный ответ (несколько вариантов через ;):",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w")
-
-        self.ent_correct_text = tk.Entry(self.text_container, font=("Segoe UI", 11))
-        self.ent_correct_text.pack(fill="x")
-
-        tk.Label(
-            self.text_container,
-            text="Например: А; а   или:   Москва; город Москва",
-            fg="#666",
-            font=("Segoe UI", 9)
-        ).pack(anchor="w")
-
-        # Настройки проверки письменного ответа
-        text_settings = tk.Frame(self.text_container)
-        text_settings.pack(fill="x", pady=(8, 0))
-
-        mode_frame = tk.Frame(text_settings)
-        mode_frame.pack(fill="x", pady=2)
-
-        tk.Label(
-            mode_frame,
-            text="Проверка ответа:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="left")
-
-        self.check_mode_var = tk.StringVar(value="Точное совпадение")
-
-        self.check_mode_combo = ttk.Combobox(
-            mode_frame,
-            textvariable=self.check_mode_var,
-            values=list(CHECK_MODE_DISPLAY.values()),
-            state="readonly",
-            width=32
-        )
-        self.check_mode_combo.pack(side="left", padx=8)
-
-        points_frame = tk.Frame(text_settings)
-        points_frame.pack(fill="x", pady=2)
-
-        tk.Label(
-            points_frame,
-            text="Баллы за полный ответ:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="left")
-
-        self.ent_full_points = tk.Entry(points_frame, width=6, font=("Segoe UI", 11))
-        self.ent_full_points.pack(side="left", padx=(5, 15))
-        self.ent_full_points.insert(0, "1")
-
-        tk.Label(
-            points_frame,
-            text="Частичный балл:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="left")
-
-        self.ent_partial_points = tk.Entry(points_frame, width=6, font=("Segoe UI", 11))
-        self.ent_partial_points.pack(side="left", padx=5)
-        self.ent_partial_points.insert(0, "0.5")
-
-        tk.Label(
-            self.text_container,
-            text=(
-                "Частичный балл начисляется, если ответ содержит правильный фрагмент/слово/букву, "
-                "но не совпадает полностью. 0 — отключить."
-            ),
-            fg="#666",
-            font=("Segoe UI", 8),
-            wraplength=560,
-            justify="left"
-        ).pack(anchor="w")
-
-        # 7. Время на вопрос
-        time_frame = tk.Frame(main)
-        time_frame.pack(fill="x", pady=(0, 6))
-
-        tk.Label(
-            time_frame,
-            text="Время на вопрос (сек):",
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="left")
-
-        self.ent_time = tk.Entry(time_frame, width=6, font=("Segoe UI", 11))
-        self.ent_time.pack(side="left", padx=10)
-        self.ent_time.insert(0, "20")
-
-        # 8. Кнопка добавления/сохранения вопроса
-        self.btn_add = tk.Button(
-            main,
-            text="➕ Добавить вопрос",
-            command=self.handle_question,
-            font=("Segoe UI", 11, "bold"),
-            bg="#4361ee",
-            fg="white",
-            relief="flat"
-        )
-        self.btn_add.pack(fill="x", pady=(5, 8))
-
-        # 9. Список вопросов
-        tk.Label(
-            main,
-            text="Добавленные вопросы:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w")
-
-        self.listbox = tk.Listbox(
-            main,
-            height=9,
-            font=("Segoe UI", 10),
-            activestyle="none"
-        )
-        self.listbox.pack(fill="both", expand=True, pady=(0, 6))
-        self.listbox.bind("<<ListboxSelect>>", self.on_select)
-
-        # 10. Предпросмотр
-        tk.Button(
-            main,
-            text="👁 Предпросмотр теста",
-            command=self.preview_test,
-            bg="#f4a261",
-            fg="white",
-            relief="flat"
-        ).pack(fill="x", pady=(0, 6))
-
-        # 11. Управление тестом
-        ctrl_frame = tk.Frame(main)
-        ctrl_frame.pack(fill="x")
-
-        tk.Button(
-            ctrl_frame,
-            text="✏️ Изменить",
-            command=self.edit_question,
-            width=12
-        ).pack(side="left", expand=True, fill="x", padx=2)
-
-        tk.Button(
-            ctrl_frame,
-            text="🗑 Удалить",
-            command=self.delete_question,
-            width=12
-        ).pack(side="left", expand=True, fill="x", padx=2)
-
-        tk.Button(
-            ctrl_frame,
-            text="📂 Загрузить",
-            command=self.load_test,
-            width=12
-        ).pack(side="left", expand=True, fill="x", padx=2)
-
-        tk.Button(
-            ctrl_frame,
-            text="💾 Сохранить JSON",
-            command=self.save_test,
-            bg="#2a9d8f",
-            fg="white",
-            width=14,
-            relief="flat"
-        ).pack(side="left", expand=True, fill="x", padx=2)
-
-    def on_qtype_change(self, event=None):
-        """Переключение интерфейса в зависимости от типа вопроса."""
-        if self.qtype_var.get() == "Письменный ответ":
-            self.choice_container.grid_remove()
-            self.text_container.grid(row=0, column=0, sticky="ew")
+    def toggle_q_type(self):
+        for w in self.answers_container.winfo_children():
+            w.destroy()
+        if self.q_type_var.get() == "choice":
+            self.setup_choice_ui()
         else:
-            self.text_container.grid_remove()
-            self.choice_container.grid(row=0, column=0, sticky="ew")
+            self.setup_text_ui()
 
-    def handle_question(self):
-        q_text = self.ent_q.get("1.0", "end").strip()
+    def setup_choice_ui(self):
+        ttk.Label(self.answers_container, text="Варианты ответов (отметьте верный):").pack(anchor=tk.W)
+        self.choice_entries = []
+        self.correct_choice_var = tk.IntVar(value=0)
 
-        try:
-            time_val = int(self.ent_time.get())
-        except ValueError:
-            messagebox.showerror("Ошибка", "Время должно быть целым числом")
+        for i in range(4):
+            f = ttk.Frame(self.answers_container)
+            f.pack(fill=tk.X, pady=2)
+            rb = ttk.Radiobutton(f, variable=self.correct_choice_var, value=i)
+            rb.pack(side=tk.LEFT)
+            e = ttk.Entry(f)
+            e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+            self.enable_copy_paste(e)
+            self.choice_entries.append(e)
+
+    def setup_text_ui(self):
+        ttk.Label(self.answers_container, text="Правильный ответ (если несколько, разделите знаками ;):").pack(anchor=tk.W)
+        self.text_ans_entry = ttk.Entry(self.answers_container)
+        self.text_ans_entry.pack(fill=tk.X, pady=2)
+        self.enable_copy_paste(self.text_ans_entry)
+
+        ttk.Label(self.answers_container, text="Правило проверки символов/букв:").pack(anchor=tk.W, pady=(5,0))
+        self.match_rule_var = tk.StringVar(value="exact")
+        rules = [
+            ("Точное совпадение слова/фразы", "exact"),
+            ("Проверка букв, слов и знаков (включая '-')", "char_match")
+        ]
+        for text, val in rules:
+            ttk.Radiobutton(self.answers_container, text=text, variable=self.match_rule_var, value=val).pack(anchor=tk.W)
+
+    def add_question(self):
+        text = self.q_text.get("1.0", tk.END).strip()
+        if not text:
+            messagebox.showwarning("Ошибка", "Введите текст вопроса")
             return
 
-        if not q_text:
-            messagebox.showwarning("Внимание", "Введите текст вопроса")
-            return
-
-        q_type_display = self.qtype_var.get()
-        q_type = "text" if q_type_display == "Письменный ответ" else "choice"
-
-        q_data = {
-            "text": q_text,
-            "type": q_type,
-            "time": time_val
-        }
+        time_val = int(self.q_time_entry.get() or 60)
+        q_type = self.q_type_var.get()
 
         if q_type == "choice":
-            opts = [e.get().strip() for e in self.opt_ents if e.get().strip()]
-
-            try:
-                correct = int(self.correct_var.get()) - 1
-            except ValueError:
-                correct = -1
-
+            opts = [e.get().strip() for e in self.choice_entries if e.get().strip()]
             if len(opts) < 2:
-                messagebox.showwarning("Внимание", "Добавьте минимум 2 варианта ответа")
+                messagebox.showwarning("Ошибка", "Заполните хотя бы 2 варианта ответа")
                 return
-
-            if correct < 0 or correct >= len(opts):
-                messagebox.showwarning(
-                    "Внимание",
-                    "Номер правильного ответа больше количества вариантов"
-                )
-                return
-
-            q_data["options"] = opts
-            q_data["correct"] = correct
-
+            q_data = {
+                "type": "choice",
+                "text": text,
+                "time": time_val,
+                "options": opts,
+                "correct": self.correct_choice_var.get()
+            }
         else:
-            raw_answers = self.ent_correct_text.get().strip()
-
-            if not raw_answers:
-                messagebox.showwarning(
-                    "Внимание",
-                    "Введите правильный ответ для письменного вопроса"
-                )
+            ans = self.text_ans_entry.get().strip()
+            if not ans:
+                messagebox.showwarning("Ошибка", "Укажите верный ответ")
                 return
-
-            answers = [
-                ans.strip()
-                for ans in raw_answers.split(";")
-                if ans.strip()
-            ]
-
-            if not answers:
-                messagebox.showwarning(
-                    "Внимание",
-                    "Введите хотя бы один правильный ответ"
-                )
-                return
-
-            check_mode = CHECK_MODE_INTERNAL.get(
-                self.check_mode_var.get(),
-                "exact"
-            )
-
-            full_points = safe_float(self.ent_full_points.get(), 1.0)
-            partial_points = safe_float(self.ent_partial_points.get(), 0.0)
-
-            if full_points < 0:
-                full_points = 0.0
-
-            if partial_points < 0:
-                partial_points = 0.0
-
-            if partial_points > full_points:
-                partial_points = full_points
-
-            q_data["answers"] = answers
-            q_data["check_mode"] = check_mode
-            q_data["full_points"] = full_points
-            q_data["partial_points"] = partial_points
-
-        if self.editing_idx is not None and 0 <= self.editing_idx < len(self.test_data["questions"]):
-            self.test_data["questions"][self.editing_idx] = q_data
-            self.editing_idx = None
-            self.btn_add.config(text="➕ Добавить вопрос", bg="#4361ee")
-            messagebox.showinfo("Успех", "Вопрос обновлён!")
-        else:
-            self.test_data["questions"].append(q_data)
-            messagebox.showinfo("Успех", "Вопрос добавлен!")
-
-        self.refresh_list()
-        self.clear_form()
-
-    def edit_question(self):
-        if self.selected_idx is None:
-            messagebox.showinfo(
-                "Инфо",
-                "Выберите вопрос из списка для редактирования"
-            )
-            return
-
-        q = self.test_data["questions"][self.selected_idx]
-
-        self.ent_q.delete("1.0", "end")
-        self.ent_q.insert("1.0", q.get("text", ""))
-
-        q_type = q.get("type", "choice")
-
-        if q_type == "text":
-            self.qtype_var.set("Письменный ответ")
-        else:
-            self.qtype_var.set("Выбор ответа")
-
-        self.on_qtype_change()
-
-        # Заполняем поля для выбора ответа
-        options = q.get("options", [])
-
-        for i in range(4):
-            self.opt_ents[i].delete(0, "end")
-
-            if i < len(options):
-                self.opt_ents[i].insert(0, options[i])
-            else:
-                self.opt_ents[i].insert(0, f"Вариант {i + 1}")
-
-        self.correct_var.set(str(q.get("correct", 0) + 1))
-
-        # Заполняем поле для письменного ответа
-        answers = get_answers_list(q)
-
-        self.ent_correct_text.delete(0, "end")
-        self.ent_correct_text.insert(0, "; ".join(answers))
-
-        check_mode = q.get("check_mode", "exact")
-        self.check_mode_var.set(
-            CHECK_MODE_DISPLAY.get(check_mode, "Точное совпадение")
-        )
-
-        self.ent_full_points.delete(0, "end")
-        self.ent_full_points.insert(0, format_number(q.get("full_points", 1.0)))
-
-        self.ent_partial_points.delete(0, "end")
-        self.ent_partial_points.insert(0, format_number(q.get("partial_points", 0.0)))
-
-        self.ent_time.delete(0, "end")
-        self.ent_time.insert(0, str(q.get("time", 20)))
-
-        self.editing_idx = self.selected_idx
-        self.btn_add.config(text="💾 Сохранить изменения", bg="#e9c46a")
-
-    def delete_question(self):
-        if self.selected_idx is None:
-            messagebox.showinfo("Инфо", "Выберите вопрос для удаления")
-            return
-
-        if messagebox.askyesno("Подтверждение", "Удалить выбранный вопрос?"):
-            self.test_data["questions"].pop(self.selected_idx)
-
-            self.editing_idx = None
-            self.selected_idx = None
-            self.btn_add.config(text="➕ Добавить вопрос", bg="#4361ee")
-
-            self.refresh_list()
-
-    def refresh_list(self):
-        self.listbox.delete(0, "end")
-
-        for i, q in enumerate(self.test_data["questions"]):
-            text = q.get("text", "")
-            time_q = q.get("time", 0)
-            q_type = q.get("type", "choice")
-
-            marker = "✍" if q_type == "text" else "☑"
-            points = format_number(get_question_max_points(q))
-
-            display_text = text[:45] + ("..." if len(text) > 45 else "")
-            self.listbox.insert(
-                "end",
-                f"{i + 1}. {marker} {display_text} | ⏱ {time_q} с | {points} б."
-            )
-
-        self.listbox.selection_clear(0, "end")
-
-    def on_select(self, event):
-        sel = self.listbox.curselection()
-        self.selected_idx = sel[0] if sel else None
-
-    def clear_form(self):
-        self.ent_q.delete("1.0", "end")
-
-        for i, e in enumerate(self.opt_ents):
-            e.delete(0, "end")
-            e.insert(0, f"Вариант {i + 1}")
-
-        self.correct_var.set("1")
-
-        self.ent_correct_text.delete(0, "end")
-
-        self.ent_time.delete(0, "end")
-        self.ent_time.insert(0, "20")
-
-        self.ent_full_points.delete(0, "end")
-        self.ent_full_points.insert(0, "1")
-
-        self.ent_partial_points.delete(0, "end")
-        self.ent_partial_points.insert(0, "0.5")
-
-        self.listbox.selection_clear(0, "end")
-
-    def update_test_metadata(self):
-        """Обновляет название, количество вопросов и критерии оценок."""
-        self.test_data["title"] = self.ent_title.get().strip() or "Тест"
-
-        total_q = len(self.test_data.get("questions", []))
-
-        try:
-            take_val = int(self.ent_take.get())
-
-            if take_val <= 0:
-                take_val = total_q
-            elif take_val > total_q:
-                messagebox.showinfo(
-                    "Коррекция",
-                    f"В пуле всего {total_q} вопросов. Будет выдаваться {total_q}."
-                )
-                take_val = total_q
-
-            self.test_data["take_questions"] = take_val
-
-        except ValueError:
-            self.test_data["take_questions"] = total_q
-
-        if "grading" not in self.test_data or not isinstance(self.test_data["grading"], dict):
-            self.test_data["grading"] = {"5": 0, "4": 0, "3": 0, "2": 0}
-
-        for g in ["5", "4", "3", "2"]:
-            current = self.test_data["grading"].get(g, 0)
-            self.test_data["grading"][g] = safe_float(self.grade_ents[g].get(), current)
-
-    def preview_test(self):
-        """Открывает предпросмотр теста."""
-        self.update_test_metadata()
-
-        if not self.test_data.get("questions"):
-            messagebox.showwarning("Внимание", "Добавьте хотя бы один вопрос")
-            return
-
-        PreviewWindow(self, self.test_data, can_save=True)
-
-    def save_test(self):
-        """
-        Сохранение теперь идёт через предпросмотр:
-        пользователь сначала видит тест, затем сохраняет JSON.
-        """
-        self.preview_test()
-
-    def load_test(self):
-        path = filedialog.askopenfilename(
-            filetypes=[("JSON", "*.json")]
-        )
-
-        if not path:
-            return
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            if not isinstance(data, dict):
-                raise ValueError("Неверный формат файла теста")
-
-            if "questions" not in data or not isinstance(data["questions"], list):
-                data["questions"] = []
-
-            if "grading" not in data or not isinstance(data["grading"], dict):
-                data["grading"] = {"5": 0, "4": 0, "3": 0, "2": 0}
-
-            self.test_data = data
-
-            self.ent_title.delete(0, "end")
-            self.ent_title.insert(0, self.test_data.get("title", "Тест"))
-
-            self.ent_take.delete(0, "end")
-            self.ent_take.insert(
-                0,
-                str(self.test_data.get("take_questions", len(self.test_data["questions"])))
-            )
-
-            for g in ["5", "4", "3", "2"]:
-                self.grade_ents[g].delete(0, "end")
-                self.grade_ents[g].insert(
-                    0,
-                    format_number(self.test_data.get("grading", {}).get(g, 0))
-                )
-
-            self.editing_idx = None
-            self.selected_idx = None
-            self.btn_add.config(text="➕ Добавить вопрос", bg="#4361ee")
-
-            self.refresh_list()
-
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить файл:\n{e}")
-
-
-# ============================================================
-# Окно предпросмотра теста
-# ============================================================
-class PreviewWindow(tk.Toplevel):
-    def __init__(self, parent, test_data, can_save=True):
-        super().__init__(parent)
-        self.test_data = copy.deepcopy(test_data)
-        self.can_save = can_save
-
-        self.title("👁 Предпросмотр теста")
-        self.geometry("780x680")
-        self.resizable(True, True)
-        self.transient(parent)
-        self.grab_set()
-        self.lift()
-
-        self.setup_ui()
-
-    def setup_ui(self):
-        top = tk.Frame(self)
-        top.pack(fill="both", expand=True, padx=10, pady=10)
-
-        text = tk.Text(
-            top,
-            wrap="word",
-            font=("Segoe UI", 10),
-            padx=10,
-            pady=10
-        )
-
-        vsb = ttk.Scrollbar(top, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=vsb.set)
-
-        text.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-
-        text.insert("1.0", self.build_preview_text())
-        text.config(state="disabled")
-
-        bottom = tk.Frame(self)
-        bottom.pack(fill="x", padx=10, pady=8)
-
-        if self.can_save:
-            tk.Button(
-                bottom,
-                text="💾 Сохранить JSON",
-                command=self.save_json,
-                bg="#2a9d8f",
-                fg="white",
-                relief="flat"
-            ).pack(side="left")
-
-        tk.Button(
-            bottom,
-            text="Закрыть",
-            command=self.destroy
-        ).pack(side="right")
-
-    def build_preview_text(self):
-        data = self.test_data
-        questions = data.get("questions", [])
-        grading = data.get("grading", {})
-
-        lines = []
-        lines.append("ПРЕДПРОСМОТР ТЕСТА")
-        lines.append("=" * 45)
-        lines.append(f"Название теста: {data.get('title', 'Тест')}")
-        lines.append(f"Всего вопросов в пуле: {len(questions)}")
-        lines.append(f"Ученику будет выдано: {data.get('take_questions', len(questions))}")
-        lines.append("")
-        lines.append("Критерии оценок:")
-
-        for mark in ["5", "4", "3", "2"]:
-            lines.append(f"   Оценка {mark}: от {format_number(grading.get(mark, 0))} баллов")
-
-        lines.append("")
-        lines.append("ВОПРОСЫ:")
-        lines.append("-" * 45)
-        lines.append("")
-
-        for i, q in enumerate(questions, 1):
-            q_type = q.get("type", "choice")
-            type_name = "Письменный ответ" if q_type == "text" else "Выбор ответа"
-
-            lines.append(f"{i}. [{type_name}] {q.get('text', '')}")
-            lines.append(f"   Время: {q.get('time', 20)} с")
-
-            if q_type == "text":
-                answers = get_answers_list(q)
-                mode = CHECK_MODE_DISPLAY.get(
-                    q.get("check_mode", "exact"),
-                    "Точное совпадение"
-                )
-
-                lines.append(f"   Проверка: {mode}")
-                lines.append(
-                    f"   Правильные ответы: {'; '.join(answers) if answers else 'не заданы'}"
-                )
-                lines.append(
-                    f"   Баллы: полный {format_number(q.get('full_points', 1.0))}, "
-                    f"частичный {format_number(q.get('partial_points', 0.0))}"
-                )
-
-            else:
-                options = q.get("options", [])
-                correct = q.get("correct", -1)
-
-                try:
-                    correct = int(correct)
-                except Exception:
-                    correct = -1
-
-                if options:
-                    lines.append("   Варианты:")
-                    for j, opt in enumerate(options):
-                        lines.append(f"      {j + 1}) {opt}")
-                else:
-                    lines.append("   Варианты: не заданы")
-
-                if 0 <= correct < len(options):
-                    lines.append(f"   Правильный ответ: {correct + 1}) {options[correct]}")
-                else:
-                    lines.append("   Правильный ответ: не задан")
-
-                lines.append("   Баллы: 1")
-
-            lines.append("")
-
-        return "\n".join(lines)
-
-    def save_json(self):
-        path = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON", "*.json")],
-            initialfile=f"{self.test_data.get('title', 'Тест').replace(' ', '_')}.json"
-        )
-
-        if path:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.test_data, f, ensure_ascii=False, indent=2)
-
-            messagebox.showinfo("Успех", f"Тест сохранён:\n{path}")
-            self.destroy()
-
-
-# ============================================================
-# Окно ученика
-# ============================================================
-class StudentWindow(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("🎓 Прохождение теста")
-        self.geometry("680x600")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        self.lift()
-
-        self.test = None
-        self.questions = []
-        self.current = 0
-        self.score = 0.0
-
-        self.timer_id = None
-        self.time_left = 0
-        self.correct_idx = -1
-
-        self.student = {
-            "last_name": "",
-            "first_name": "",
-            "group": ""
-        }
-
-        self.setup_ui()
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def setup_ui(self):
-        # Экран регистрации ученика
-        self.reg_frame = tk.Frame(self, padx=30, pady=20)
-        self.reg_frame.pack(fill="both", expand=True)
-
-        tk.Label(
-            self.reg_frame,
-            text="Регистрация ученика",
-            font=("Segoe UI", 18, "bold")
-        ).pack(pady=(10, 20))
-
-        tk.Label(
-            self.reg_frame,
-            text="Фамилия:",
-            font=("Segoe UI", 11, "bold")
-        ).pack(anchor="w")
-
-        self.ent_last = tk.Entry(self.reg_frame, font=("Segoe UI", 12))
-        self.ent_last.pack(fill="x", pady=(0, 10))
-
-        tk.Label(
-            self.reg_frame,
-            text="Имя:",
-            font=("Segoe UI", 11, "bold")
-        ).pack(anchor="w")
-
-        self.ent_first = tk.Entry(self.reg_frame, font=("Segoe UI", 12))
-        self.ent_first.pack(fill="x", pady=(0, 10))
-
-        tk.Label(
-            self.reg_frame,
-            text="Номер группы:",
-            font=("Segoe UI", 11, "bold")
-        ).pack(anchor="w")
-
-        self.ent_group = tk.Entry(self.reg_frame, font=("Segoe UI", 12))
-        self.ent_group.pack(fill="x", pady=(0, 20))
-
-        tk.Button(
-            self.reg_frame,
-            text="📂 Выбрать файл теста и начать",
-            command=self.load_test,
-            font=("Segoe UI", 13, "bold"),
-            bg="#4361ee",
-            fg="white",
-            relief="flat"
-        ).pack(pady=10, fill="x")
-
-        tk.Label(
-            self.reg_frame,
-            text="После завершения теста результат будет сохранён в статистику.",
-            fg="gray",
-            font=("Segoe UI", 9)
-        ).pack(pady=10)
-
-        # Экран прохождения теста
-        self.test_frame = tk.Frame(self, padx=20, pady=10)
-
-        self.lbl_title = tk.Label(
-            self.test_frame,
-            text="",
-            font=("Segoe UI", 15, "bold")
-        )
-        self.lbl_title.pack(pady=(10, 5))
-
-        self.lbl_timer = tk.Label(
-            self.test_frame,
-            text="⏱ 00:00",
-            font=("Segoe UI", 20, "bold"),
-            fg="#e63946"
-        )
-        self.lbl_timer.pack()
-
-        self.lbl_q = tk.Label(
-            self.test_frame,
-            text="",
-            wraplength=560,
-            font=("Segoe UI", 13),
-            justify="left"
-        )
-        self.lbl_q.pack(pady=10)
-
-        # Область ответов: сюда переключаем выбор ответа / письменный ответ
-        self.answer_area = tk.Frame(self.test_frame)
-        self.answer_area.pack(fill="x", pady=5)
-        self.answer_area.columnconfigure(0, weight=1)
-
-        # Варианты ответа
-        self.opts_frame = tk.Frame(self.answer_area)
-        self.opts_frame.grid(row=0, column=0, sticky="ew")
-
-        self.answer_var = tk.StringVar(value="-1")
-        self.opt_btns = []
-
-        for i in range(4):
-            rb = tk.Radiobutton(
-                self.opts_frame,
-                text="",
-                variable=self.answer_var,
-                value=str(i),
-                font=("Segoe UI", 12),
-                anchor="w",
-                indicatoron=False,
-                width=55,
-                bg="white",
-                activebackground="#f0f4ff"
-            )
-            rb.pack(pady=4, fill="x")
-            self.opt_btns.append(rb)
-
-        # Письменный ответ
-        self.text_frame = tk.Frame(self.answer_area)
-        self.text_frame.grid(row=0, column=0, sticky="ew")
-        self.text_frame.grid_remove()
-
-        self.lbl_text_answer = tk.Label(
-            self.text_frame,
-            text="Введите ответ:",
-            font=("Segoe UI", 11, "bold")
-        )
-        self.lbl_text_answer.pack(anchor="w")
-
-        self.answer_entry_var = tk.StringVar()
-        self.ent_answer = tk.Entry(
-            self.text_frame,
-            textvariable=self.answer_entry_var,
-            font=("Segoe UI", 13)
-        )
-        self.ent_answer.pack(fill="x", ipady=6)
-        self.ent_answer.bind("<Return>", lambda event: self.next_q())
-
-        self.btn_next = tk.Button(
-            self.test_frame,
-            text="Далее →",
-            command=self.next_q,
-            font=("Segoe UI", 13, "bold"),
-            bg="#2a9d8f",
-            fg="white",
-            relief="flat",
-            state="disabled"
-        )
-        self.btn_next.pack(pady=15)
-
-        self.lbl_prog = tk.Label(
-            self.test_frame,
-            text="",
-            font=("Segoe UI", 10),
-            fg="gray"
-        )
-        self.lbl_prog.pack()
-
-        self.lbl_points = tk.Label(
-            self.test_frame,
-            text="",
-            font=("Segoe UI", 9),
-            fg="gray"
-        )
-        self.lbl_points.pack()
-
-    def load_test(self):
-        last_name = self.ent_last.get().strip()
-        first_name = self.ent_first.get().strip()
-        group = self.ent_group.get().strip()
-
-        if not last_name or not first_name or not group:
-            messagebox.showwarning(
-                "Внимание",
-                "Заполните фамилию, имя и номер группы перед прохождением теста."
-            )
-            return
-
-        path = filedialog.askopenfilename(
-            filetypes=[("JSON", "*.json")]
-        )
-
-        if not path:
-            return
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                self.test = json.load(f)
-
-            if not isinstance(self.test, dict):
-                raise ValueError("Неверный формат файла теста")
-
-            questions = copy.deepcopy(self.test.get("questions", []))
-
-            if not isinstance(questions, list):
-                raise ValueError("Неверный формат списка вопросов")
-
-            if not questions:
-                messagebox.showwarning("Внимание", "В тесте нет вопросов")
-                return
-
-            random.shuffle(questions)
-
-            take_n = self.test.get("take_questions", len(questions))
-
-            try:
-                take_n = int(take_n)
-            except ValueError:
-                take_n = len(questions)
-
-            if take_n <= 0 or take_n > len(questions):
-                take_n = len(questions)
-
-            self.questions = questions[:take_n]
-            self.current = 0
-            self.score = 0.0
-
-            self.student = {
-                "last_name": last_name,
-                "first_name": first_name,
-                "group": group
+            q_data = {
+                "type": "text",
+                "text": text,
+                "time": time_val,
+                "correct": ans,
+                "rule": self.match_rule_var.get()
             }
 
-            self.reg_frame.pack_forget()
-            self.test_frame.pack(fill="both", expand=True)
+        self.test_data["questions"].append(q_data)
+        messagebox.showinfo("Успех", "Вопрос успешно добавлен!")
+        self.q_text.delete("1.0", tk.END)
 
-            self.show_q()
+    def save_test_file(self):
+        self.test_data["title"] = self.title_entry.get().strip()
+        self.test_data["questions_to_show"] = int(self.q_count_entry.get() or 5)
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.test_data, f, ensure_ascii=False, indent=4)
+            messagebox.showinfo("Сохранено", "Тест успешно сохранён!")
 
-        except Exception as e:
-            messagebox.showerror(
-                "Ошибка",
-                f"Файл повреждён или неверный формат:\n{e}"
-            )
+    def load_test_file(self):
+        path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+        if path:
+            with open(path, "r", encoding="utf-8") as f:
+                self.test_data = json.load(f)
+            self.start_teacher_mode()
 
-    def show_q(self):
-        if self.timer_id:
-            self.after_cancel(self.timer_id)
-            self.timer_id = None
+    # --- Режим ученика ---
+    def start_student_mode(self):
+        self.clear_screen()
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(expand=True, fill=tk.BOTH)
 
-        if self.current >= len(self.questions):
-            self.finish()
+        self.create_top_bar(main_frame)
+
+        ttk.Label(main_frame, text="Регистрация ученика", font=("Arial", 16, "bold")).pack(pady=10)
+
+        form = ttk.Frame(main_frame)
+        form.pack(pady=10)
+
+        ttk.Label(form, text="Фамилия и Имя:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        name_entry = ttk.Entry(form, width=30)
+        name_entry.grid(row=0, column=1, pady=5)
+        self.enable_copy_paste(name_entry)
+
+        ttk.Label(form, text="Класс / Группа:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        group_entry = ttk.Entry(form, width=30)
+        group_entry.grid(row=1, column=1, pady=5)
+        self.enable_copy_paste(group_entry)
+
+        def proceed():
+            name = name_entry.get().strip()
+            group = group_entry.get().strip()
+            if not name or not group:
+                messagebox.showwarning("Ошибка", "Заполните все поля")
+                return
+            
+            path = filedialog.askopenfilename(title="Выберите файл теста", filetypes=[("JSON files", "*.json")])
+            if not path:
+                return
+            
+            with open(path, "r", encoding="utf-8") as f:
+                self.test_data = json.load(f)
+
+            self.current_student = {"name": name, "group": group}
+            self.prepare_test()
+
+        ttk.Button(main_frame, text="📂 Выбрать файл теста и начать", command=proceed).pack(pady=20)
+        ttk.Button(main_frame, text="⬅ Назад", command=self.create_main_menu).pack()
+
+    def prepare_test(self):
+        qs = copy.deepcopy(self.test_data.get("questions", []))
+        random.shuffle(qs)
+        limit = min(self.test_data.get("questions_to_show", len(qs)), len(qs))
+        self.active_questions = qs[:limit]
+        self.current_q_index = 0
+        self.student_answers = []
+        self.run_question()
+
+    def run_question(self):
+        self.clear_screen()
+        if self.current_q_index >= len(self.active_questions):
+            self.finish_test()
             return
 
-        q = self.questions[self.current]
-        q_type = q.get("type", "choice")
+        q = self.active_questions[self.current_q_index]
+        self.time_left = q.get("time", 60)
 
-        self.lbl_title.config(text=f"📝 {self.test.get('title', 'Тест')}")
-        self.lbl_q.config(text=q.get("text", ""))
-        self.lbl_prog.config(text=f"Вопрос {self.current + 1} из {len(self.questions)}")
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(expand=True, fill=tk.BOTH)
 
-        max_points = get_question_max_points(q)
-        self.lbl_points.config(
-            text=f"Максимум баллов за вопрос: {format_number(max_points)}"
-        )
+        self.create_top_bar(main_frame)
 
-        self.btn_next.config(state="normal")
+        # Шапка с таймером
+        header = ttk.Frame(main_frame)
+        header.pack(fill=tk.X)
+        ttk.Label(header, text=f"Вопрос {self.current_q_index + 1} из {len(self.active_questions)}", font=("Arial", 12)).pack(side=tk.LEFT)
+        self.timer_label = ttk.Label(header, text=f"⏱ Время: {self.time_left} с", font=("Arial", 12, "bold"), foreground="red")
+        self.timer_label.pack(side=tk.RIGHT)
 
-        if q_type == "text":
-            self.opts_frame.grid_remove()
-            self.text_frame.grid(row=0, column=0, sticky="ew")
+        ttk.Label(main_frame, text=q["text"], font=("Arial", 14), wraplength=700).pack(pady=20)
 
-            mode = q.get("check_mode", "exact")
+        self.ans_var = tk.StringVar()
 
-            if mode == "letter":
-                hint = "Введите пропущенную букву:"
-            elif mode == "contains":
-                hint = "Введите ответ (правильный ответ может быть в составе вашего ответа):"
-            else:
-                hint = "Введите ответ:"
-
-            self.lbl_text_answer.config(text=hint)
-
-            self.answer_entry_var.set("")
-            self.ent_answer.focus_set()
-
-            self.correct_idx = -1
-
+        if q["type"] == "choice":
+            for i, opt in enumerate(q["options"]):
+                ttk.Radiobutton(main_frame, text=opt, variable=self.ans_var, value=str(i)).pack(anchor=tk.W, pady=5)
         else:
-            self.text_frame.grid_remove()
-            self.opts_frame.grid(row=0, column=0, sticky="ew")
+            ttk.Label(main_frame, text="Введите ваш ответ (символы/буквы/слово, включая '-'):").pack(anchor=tk.W)
+            entry = ttk.Entry(main_frame, textvariable=self.ans_var, width=40, font=("Arial", 12))
+            entry.pack(pady=10, anchor=tk.W)
+            entry.focus()
+            self.enable_copy_paste(entry)
 
-            self.answer_var.set("-1")
-
-            options = q.get("options", [])
-            correct = q.get("correct", 0)
-
-            pairs = [
-                (options[i], i == correct)
-                for i in range(len(options))
-            ]
-
-            random.shuffle(pairs)
-
-            self.correct_idx = next(
-                (i for i, (_, is_correct) in enumerate(pairs) if is_correct),
-                -1
-            )
-
-            for i, rb in enumerate(self.opt_btns):
-                if i < len(pairs):
-                    rb.config(text=f"{i + 1}. {pairs[i][0]}", state="normal")
-                else:
-                    rb.config(text="", state="disabled")
-
-        try:
-            self.time_left = int(q.get("time", 20))
-        except Exception:
-            self.time_left = 20
+        ttk.Button(main_frame, text="Ответить ➔", command=self.next_question).pack(pady=20)
 
         self.update_timer()
 
     def update_timer(self):
-        m, s = divmod(max(self.time_left, 0), 60)
-
-        self.lbl_timer.config(text=f"⏱ {m:02d}:{s:02d}")
-        self.lbl_timer.config(
-            fg="#e63946" if self.time_left <= 5 else "#2b2d42"
-        )
-
         if self.time_left > 0:
-            self.timer_id = self.after(1000, self.tick)
+            self.timer_label.config(text=f"⏱ Время: {self.time_left} с")
+            self.time_left -= 1
+            self.timer_id = self.root.after(1000, self.update_timer)
         else:
-            self.timeout()
+            self.next_question()
 
-    def tick(self):
-        self.time_left -= 1
-        self.update_timer()
-
-    def timeout(self):
-        self.current += 1
-        self.show_q()
-
-    def next_q(self):
-        if self.current >= len(self.questions):
-            self.finish()
-            return
-
-        q = self.questions[self.current]
-        q_type = q.get("type", "choice")
-
-        if q_type == "text":
-            user_answer = self.answer_entry_var.get()
-
-            if not user_answer.strip():
-                messagebox.showwarning("Внимание", "Введите ответ!")
-                return
-
-            points = score_text_question(q, user_answer)
-            self.score += points
-
-        else:
-            chosen = self.answer_var.get()
-
-            if chosen == "-1":
-                messagebox.showwarning("Внимание", "Выберите вариант ответа!")
-                return
-
-            if int(chosen) == self.correct_idx:
-                self.score += 1.0
-
-        self.current += 1
-        self.show_q()
-
-    def finish(self):
+    def next_question(self):
         if self.timer_id:
-            self.after_cancel(self.timer_id)
+            self.root.after_cancel(self.timer_id)
             self.timer_id = None
 
-        total = sum(get_question_max_points(q) for q in self.questions)
-        grading = self.test.get("grading", {}) if self.test else {}
+        user_ans = self.ans_var.get().strip() if hasattr(self, 'ans_var') else ""
+        self.student_answers.append(user_ans)
+        self.current_q_index += 1
+        self.run_question()
 
-        def get_grade_threshold(mark):
-            return safe_float(grading.get(mark, 0), 0.0)
+    def calculate_score(self):
+        total_score = 0
+        max_score = len(self.active_questions)
 
-        grade = "2"
+        for i, q in enumerate(self.active_questions):
+            ans = self.student_answers[i]
+            if not ans:
+                continue
 
-        if self.score >= get_grade_threshold("5"):
-            grade = "5"
-        elif self.score >= get_grade_threshold("4"):
-            grade = "4"
-        elif self.score >= get_grade_threshold("3"):
-            grade = "3"
+            if q["type"] == "choice":
+                if str(q["correct"]) == ans:
+                    total_score += 1
+            else:
+                correct_variants = [v.strip().lower() for v in q["correct"].split(";")]
+                user_ans_clean = ans.lower()
 
-        now = datetime.now()
+                if q.get("rule") == "exact":
+                    if user_ans_clean in correct_variants:
+                        total_score += 1
+                else:
+                    # Учитывает символы, буквы, дефисы и пропуски "-"
+                    best_match = 0
+                    for var in correct_variants:
+                        matches = sum(1 for c in user_ans_clean if c in var or c == '-')
+                        score = matches / max(len(var), 1)
+                        if score > best_match:
+                            best_match = score
+                    total_score += min(best_match, 1.0)
 
-        record = {
-            "last_name": self.student.get("last_name", ""),
-            "first_name": self.student.get("first_name", ""),
-            "group": self.student.get("group", ""),
-            "test": self.test.get("title", "Без названия") if self.test else "Без названия",
-            "score": round(self.score, 2),
-            "total": round(total, 2),
-            "grade": grade,
-            "date": now.strftime("%d.%m.%Y %H:%M"),
-            "timestamp": now.timestamp()
+        percent = (total_score / max_score * 100) if max_score > 0 else 0
+        
+        grades = self.test_data.get("grades", {"5": 90, "4": 75, "3": 50})
+        if percent >= grades.get("5", 90):
+            grade = 5
+        elif percent >= grades.get("4", 75):
+            grade = 4
+        elif percent >= grades.get("3", 50):
+            grade = 3
+        else:
+            grade = 2
+
+        return round(total_score, 1), max_score, round(percent, 1), grade
+
+    def finish_test(self):
+        self.clear_screen()
+        score, max_s, percent, grade = self.calculate_score()
+
+        # Сохранение статистики с именем теста
+        test_title = self.test_data.get("title", "Тест без названия")
+        stat_entry = {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "test_title": test_title,
+            "name": self.current_student["name"],
+            "group": self.current_student["group"],
+            "score": f"{score}/{max_s}",
+            "percent": f"{percent}%",
+            "grade": grade
         }
 
-        try:
-            append_statistics(record)
-        except Exception as e:
-            messagebox.showwarning(
-                "Статистика",
-                f"Не удалось сохранить статистику:\n{e}"
-            )
-
-        for w in self.winfo_children():
-            w.destroy()
-
-        tk.Label(
-            self,
-            text="✅ Тест завершён!",
-            font=("Segoe UI", 20, "bold")
-        ).pack(pady=30)
-
-        tk.Label(
-            self,
-            text=f"Результат: {format_number(self.score)} из {format_number(total)}",
-            font=("Segoe UI", 16)
-        ).pack(pady=5)
-
-        tk.Label(
-            self,
-            text=f"Оценка: {grade}",
-            font=("Segoe UI", 26, "bold"),
-            fg="#2a9d8f"
-        ).pack(pady=15)
-
-        tk.Label(
-            self,
-            text="Результат сохранён в статистику.",
-            fg="gray",
-            font=("Segoe UI", 10)
-        ).pack(pady=5)
-
-        tk.Button(
-            self,
-            text="В главное меню",
-            command=self.destroy,
-            font=("Segoe UI", 12),
-            relief="flat"
-        ).pack(pady=20)
-
-    def on_close(self):
-        if self.timer_id:
-            self.after_cancel(self.timer_id)
-            self.timer_id = None
-
-        self.destroy()
-
-
-# ============================================================
-# Окно статистики
-# ============================================================
-class StatsWindow(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("📊 Статистика")
-        self.geometry("1050x560")
-        self.resizable(True, True)
-        self.transient(parent)
-        self.grab_set()
-        self.lift()
-
-        self.stats = []
-        self.student_map = {}
-
-        self.setup_ui()
-        self.refresh()
-
-    def setup_ui(self):
-        top = tk.Frame(self, padx=12, pady=10)
-        top.pack(fill="x")
-
-        tk.Label(
-            top,
-            text="Статистика прохождения тестов",
-            font=("Segoe UI", 16, "bold")
-        ).pack(anchor="w")
-
-        ctrl = tk.Frame(top)
-        ctrl.pack(fill="x", pady=10)
-
-        tk.Label(
-            ctrl,
-            text="Ученик:",
-            font=("Segoe UI", 10, "bold")
-        ).pack(side="left")
-
-        self.student_combo = ttk.Combobox(
-            ctrl,
-            state="readonly",
-            width=55
-        )
-        self.student_combo.pack(side="left", padx=8)
-
-        tk.Button(
-            ctrl,
-            text="🗑 Удалить статистику ученика",
-            command=self.delete_student_all,
-            bg="#e76f51",
-            fg="white",
-            relief="flat"
-        ).pack(side="left", padx=5)
-
-        tk.Button(
-            ctrl,
-            text="🗑 Удалить всю статистику",
-            command=self.delete_all,
-            bg="#d62828",
-            fg="white",
-            relief="flat"
-        ).pack(side="left", padx=5)
-
-        tk.Button(
-            ctrl,
-            text="🔄 Обновить",
-            command=self.refresh
-        ).pack(side="left", padx=5)
-
-        table = tk.Frame(self, padx=12)
-        table.pack(fill="both", expand=True)
-
-        columns = ("last", "first", "group", "test", "date", "score", "grade")
-
-        self.tree = ttk.Treeview(
-            table,
-            columns=columns,
-            show="headings",
-            selectmode="extended"
-        )
-
-        headings = [
-            ("last", "Фамилия", 110),
-            ("first", "Имя", 110),
-            ("group", "Группа", 90),
-            ("test", "Тест", 220),
-            ("date", "Дата и время", 140),
-            ("score", "Баллы", 100),
-            ("grade", "Оценка", 70),
-        ]
-
-        for col, text, width in headings:
-            self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, anchor="w")
-
-        vsb = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-
-        table.rowconfigure(0, weight=1)
-        table.columnconfigure(0, weight=1)
-
-        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-
-        bottom = tk.Frame(self, padx=12, pady=10)
-        bottom.pack(fill="x")
-
-        tk.Button(
-            bottom,
-            text="Удалить выбранную запись",
-            command=self.delete_selected_record
-        ).pack(side="left")
-
-        tk.Label(
-            bottom,
-            text="Выберите строку в таблице, чтобы удалить одну или несколько записей.",
-            fg="gray"
-        ).pack(side="left", padx=10)
-
-        tk.Button(
-            bottom,
-            text="Закрыть",
-            command=self.destroy
-        ).pack(side="right")
-
-    def refresh(self):
-        self.stats = load_statistics()
-
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        indexed = list(enumerate(self.stats))
-
-        def sort_key(item):
-            timestamp = item[1].get("timestamp", 0)
-            return timestamp if isinstance(timestamp, (int, float)) else 0
-
-        indexed.sort(key=sort_key, reverse=True)
-
-        for idx, rec in indexed:
-            score = rec.get("score", "")
-            total = rec.get("total", "")
-
-            if score == "" and total == "":
-                score_display = ""
-            elif total == "":
-                score_display = format_number(score)
-            else:
-                score_display = f"{format_number(score)}/{format_number(total)}"
-
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(idx),
-                values=(
-                    rec.get("last_name", ""),
-                    rec.get("first_name", ""),
-                    rec.get("group", ""),
-                    rec.get("test", ""),
-                    rec.get("date", ""),
-                    score_display,
-                    rec.get("grade", "")
-                )
-            )
-
-        self.fill_combo()
-
-    def make_student_display(self, rec):
-        return f"{rec.get('last_name', '')} {rec.get('first_name', '')} — группа {rec.get('group', '')}".strip()
-
-    def fill_combo(self):
-        current = self.student_combo.get()
-        self.student_map = {}
-
-        for rec in self.stats:
-            display = self.make_student_display(rec)
-            key = (
-                rec.get("last_name", ""),
-                rec.get("first_name", ""),
-                rec.get("group", "")
-            )
-            self.student_map[display] = key
-
-        values = list(self.student_map.keys())
-        self.student_combo["values"] = values
-
-        if current in self.student_map:
-            self.student_combo.set(current)
-        else:
-            self.student_combo.set("")
-
-    def on_tree_select(self, event=None):
-        sel = self.tree.selection()
-
-        if not sel:
-            return
-
-        try:
-            idx = int(sel[0])
-        except Exception:
-            return
-
-        if 0 <= idx < len(self.stats):
-            display = self.make_student_display(self.stats[idx])
-
-            if display in self.student_map:
-                self.student_combo.set(display)
-
-    def delete_selected_record(self):
-        selected = self.tree.selection()
-
-        if not selected:
-            messagebox.showinfo(
-                "Информация",
-                "Сначала выберите запись в таблице."
-            )
-            return
-
-        if not messagebox.askyesno(
-            "Подтверждение",
-            f"Удалить выбранные записи ({len(selected)} шт.)?"
-        ):
-            return
-
-        indexes = []
-
-        for iid in selected:
+        stats = []
+        if os.path.exists("test_statistics.json"):
             try:
-                indexes.append(int(iid))
-            except Exception:
+                with open("test_statistics.json", "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+            except:
+                stats = []
+
+        stats.append(stat_entry)
+        with open("test_statistics.json", "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=4)
+
+        # Вывод результатов
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(expand=True, fill=tk.BOTH)
+
+        self.create_top_bar(main_frame)
+
+        ttk.Label(main_frame, text="Тест завершён!", font=("Arial", 18, "bold")).pack(pady=10)
+        ttk.Label(main_frame, text=f"Тест: {test_title}", font=("Arial", 12)).pack(pady=2)
+        ttk.Label(main_frame, text=f"Ученик: {self.current_student['name']} ({self.current_student['group']})").pack(pady=2)
+        ttk.Label(main_frame, text=f"Результат: {score} из {max_s} ({percent}%)", font=("Arial", 14)).pack(pady=10)
+        
+        color = "green" if grade >= 4 else ("orange" if grade == 3 else "red")
+        ttk.Label(main_frame, text=f"Оценка: {grade}", font=("Arial", 26, "bold"), foreground=color).pack(pady=10)
+
+        ttk.Button(main_frame, text="В главное меню", command=self.create_main_menu).pack(pady=20)
+
+    # --- Статистика ---
+    def show_statistics(self):
+        self.clear_screen()
+        main_frame = ttk.Frame(self.root, padding=15)
+        main_frame.pack(expand=True, fill=tk.BOTH)
+
+        self.create_top_bar(main_frame)
+
+        top = ttk.Frame(main_frame)
+        top.pack(fill=tk.X, pady=5)
+        ttk.Button(top, text="⬅ Главное меню", command=self.create_main_menu).pack(side=tk.LEFT)
+        ttk.Button(top, text="🗑 Очистить историю", command=self.clear_statistics).pack(side=tk.RIGHT)
+
+        ttk.Label(main_frame, text="Результаты тестирования", font=("Arial", 16, "bold")).pack(pady=10)
+
+        # Добавлена колонка Название теста (test_title)
+        cols = ("date", "test_title", "name", "group", "score", "percent", "grade")
+        tree = ttk.Treeview(main_frame, columns=cols, show="headings")
+        
+        tree.heading("date", text="Дата")
+        tree.heading("test_title", text="Название теста")
+        tree.heading("name", text="ФИО ученика")
+        tree.heading("group", text="Класс/Группа")
+        tree.heading("score", text="Баллы")
+        tree.heading("percent", text="Процент")
+        tree.heading("grade", text="Оценка")
+
+        tree.column("date", width=120)
+        tree.column("test_title", width=180)
+        tree.column("name", width=160)
+        tree.column("group", width=90)
+        tree.column("score", width=70)
+        tree.column("percent", width=70)
+        tree.column("grade", width=60)
+
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        if os.path.exists("test_statistics.json"):
+            try:
+                with open("test_statistics.json", "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+                    for item in reversed(stats):
+                        tree.insert("", tk.END, values=(
+                            item.get("date", "-"),
+                            item.get("test_title", "Тест"),
+                            item.get("name", "-"),
+                            item.get("group", "-"),
+                            item.get("score", "-"),
+                            item.get("percent", "-"),
+                            item.get("grade", "-")
+                        ))
+            except:
                 pass
 
-        indexes = sorted(set(indexes), reverse=True)
+    def clear_statistics(self):
+        if messagebox.askyesno("Подтверждение", "Удалить все данные статистики?"):
+            if os.path.exists("test_statistics.json"):
+                os.remove("test_statistics.json")
+            self.show_statistics()
 
-        for idx in indexes:
-            if 0 <= idx < len(self.stats):
-                self.stats.pop(idx)
-
-        save_statistics(self.stats)
-        self.refresh()
-
-    def delete_student_all(self):
-        display = self.student_combo.get().strip()
-        key = self.student_map.get(display)
-
-        if not key:
-            sel = self.tree.selection()
-
-            if sel:
-                try:
-                    idx = int(sel[0])
-                    rec = self.stats[idx]
-
-                    key = (
-                        rec.get("last_name", ""),
-                        rec.get("first_name", ""),
-                        rec.get("group", "")
-                    )
-
-                    display = self.make_student_display(rec)
-
-                except Exception:
-                    pass
-
-        if not key:
-            messagebox.showinfo(
-                "Информация",
-                "Выберите ученика в списке или в таблице."
-            )
-            return
-
-        if not messagebox.askyesno(
-            "Подтверждение",
-            f"Удалить всю статистику для ученика:\n{display}?"
-        ):
-            return
-
-        self.stats = [
-            rec for rec in self.stats
-            if (
-                rec.get("last_name", ""),
-                rec.get("first_name", ""),
-                rec.get("group", "")
-            ) != key
-        ]
-
-        save_statistics(self.stats)
-        self.refresh()
-
-    def delete_all(self):
-        if not self.stats:
-            messagebox.showinfo("Информация", "Статистика уже пуста.")
-            return
-
-        if messagebox.askyesno(
-            "Подтверждение",
-            "Удалить всю статистику?\nЭто действие нельзя отменить."
-        ):
-            save_statistics([])
-            self.refresh()
-
-
-# ============================================================
-# Запуск программы
-# ============================================================
 if __name__ == "__main__":
-    app = TestApp()
-    app.root.mainloop()
+    root = tk.Tk()
+    app = TestApp(root)
+    root.mainloop()
