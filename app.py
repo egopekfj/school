@@ -73,7 +73,7 @@ class TestApp:
 
     def create_top_bar(self, parent):
         top_frame = ttk.Frame(parent)
-        top_frame.pack(fill=tk.X, pady=5, px=10)
+        top_frame.pack(fill=tk.X, pady=5, padx=10)
         fs_btn = ttk.Button(top_frame, text="🔲 На весь экран (F11)", command=self.toggle_fullscreen)
         fs_btn.pack(side=tk.RIGHT)
         return top_frame
