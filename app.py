@@ -28,7 +28,7 @@ CHECK_MODE_INTERNAL = {v: k for k, v in CHECK_MODE_DISPLAY.items()}
 
 
 # ============================================================
-# 4 НОВЫЕ / ИНТЕГРИРОВАННЫЕ ФУНКЦИИ
+# ВСПОМОГАТЕЛЬНЫЕ И СЕРВИСНЫЕ ФУНКЦИИ
 # ============================================================
 def add_context_menu(widget):
   """Добавляет контекстное меню (ПКМ) Копировать / Вставить / Вырезать."""
@@ -90,30 +90,6 @@ def make_fullscreen(window):
   window.bind("<Escape>", end_fullscreen)
 
 
-def check_user_answer(
-    user_answer, correct_answers, mode="exact", full_points=1.0
-):
-  """Проверяет ответ ученика в зависимости от выбранного режима."""
-  if not user_answer or not str(user_answer).strip():
-    return 0.0
-
-  ans = str(user_answer).strip()
-
-  if mode == "dash":
-    return full_points if ans in ["-", "–", "—"] else 0.0
-
-  if mode == "letter":
-    return full_points if letter_answer_is_correct(ans, correct_answers) else 0.0
-
-  if mode == "contains":
-    return full_points if contains_correct_answer(ans, correct_answers) else 0.0
-
-  return full_points if exact_answer_is_correct(ans, correct_answers) else 0.0
-
-
-# ============================================================
-# Вспомогательные функции
-# ============================================================
 def safe_float(value, default=0.0):
   """Безопасное преобразование в float."""
   if value is None:
@@ -291,6 +267,27 @@ def exact_answer_is_correct(user_answer, accepted_answers):
   return False
 
 
+def check_user_answer(
+    user_answer, correct_answers, mode="exact", full_points=1.0
+):
+  """Проверяет ответ ученика в зависимости от выбранного режима."""
+  if not user_answer or not str(user_answer).strip():
+    return 0.0
+
+  ans = str(user_answer).strip()
+
+  if mode == "dash":
+    return full_points if ans in ["-", "–", "—"] else 0.0
+
+  if mode == "letter":
+    return full_points if letter_answer_is_correct(ans, correct_answers) else 0.0
+
+  if mode == "contains":
+    return full_points if contains_correct_answer(ans, correct_answers) else 0.0
+
+  return full_points if exact_answer_is_correct(ans, correct_answers) else 0.0
+
+
 def get_question_max_points(q):
   """Максимальный балл за вопрос."""
   if q.get("type") == "text":
@@ -313,12 +310,10 @@ def score_text_question(q, user_answer):
 
   mode = q.get("check_mode", "exact")
 
-  # Быстрая проверка через функцию check_user_answer
   res = check_user_answer(user_answer, answers, mode=mode, full_points=full_points)
   if res > 0:
     return res
 
-  # Проверка частичного балла
   if partial_points > 0:
     if mode == "letter" and letter_answer_contains(user_answer, answers):
       return partial_points
@@ -331,7 +326,7 @@ def score_text_question(q, user_answer):
 
 
 # ============================================================
-# Главное окно
+# ГЛАВНОЕ ОКНО ПРИЛОЖЕНИЯ
 # ============================================================
 class TestApp:
 
@@ -406,7 +401,7 @@ class TestApp:
 
 
 # ============================================================
-# Окно учителя
+# ОКНО УЧИТЕЛЯ (КОНСТРУКТОР ТЕСТОВ)
 # ============================================================
 class TeacherWindow(tk.Toplevel):
 
@@ -434,7 +429,6 @@ class TeacherWindow(tk.Toplevel):
     main = tk.Frame(self, padx=15, pady=10)
     main.pack(fill=tk.BOTH, expand=True)
 
-    # 1. Название теста
     tk.Label(main, text="Название теста:", font=("Segoe UI", 10, "bold")).pack(
         anchor="w"
     )
@@ -444,7 +438,6 @@ class TeacherWindow(tk.Toplevel):
     self.ent_title.insert(0, "Контрольная работа")
     add_context_menu(self.ent_title)
 
-    # 2. Сколько вопросов выдавать
     tk.Label(
         main,
         text="Количество вопросов в варианте (из общего пула):",
@@ -466,7 +459,6 @@ class TeacherWindow(tk.Toplevel):
         font=("Segoe UI", 9),
     ).pack(anchor="w", pady=(0, 6))
 
-    # 3. Критерии оценок
     tk.Label(
         main,
         text="Мин. баллов для оценок (5 / 4 / 3 / 2):",
@@ -489,7 +481,6 @@ class TeacherWindow(tk.Toplevel):
       self.grade_ents[g].insert(0, str(self.test_data["grading"][g]))
       add_context_menu(self.grade_ents[g])
 
-    # 4. Текст вопроса
     tk.Label(main, text="Текст вопроса:", font=("Segoe UI", 10, "bold")).pack(
         anchor="w"
     )
@@ -498,7 +489,6 @@ class TeacherWindow(tk.Toplevel):
     self.ent_q.pack(fill="x", pady=(0, 6))
     add_context_menu(self.ent_q)
 
-    # 5. Тип вопроса
     type_frame = tk.Frame(main)
     type_frame.pack(fill="x", pady=(0, 6))
 
@@ -518,12 +508,10 @@ class TeacherWindow(tk.Toplevel):
     self.type_combo.pack(side="left", padx=10)
     self.type_combo.bind("<<ComboboxSelected>>", self.on_qtype_change)
 
-    # 6. Динамическая область
     self.dynamic_frame = tk.Frame(main)
     self.dynamic_frame.pack(fill="x", pady=(0, 6))
     self.dynamic_frame.columnconfigure(0, weight=1)
 
-    # Блок выбора ответа
     self.choice_container = tk.Frame(self.dynamic_frame)
     self.choice_container.grid(row=0, column=0, sticky="ew")
 
@@ -559,7 +547,6 @@ class TeacherWindow(tk.Toplevel):
         choice_correct_frame, self.correct_var, "1", "2", "3", "4"
     ).pack(side="left", padx=5)
 
-    # Блок письменного ответа
     self.text_container = tk.Frame(self.dynamic_frame)
     self.text_container.grid(row=0, column=0, sticky="ew")
     self.text_container.grid_remove()
@@ -643,7 +630,6 @@ class TeacherWindow(tk.Toplevel):
         justify="left",
     ).pack(anchor="w")
 
-    # 7. Время на вопрос
     time_frame = tk.Frame(main)
     time_frame.pack(fill="x", pady=(0, 6))
 
@@ -656,7 +642,6 @@ class TeacherWindow(tk.Toplevel):
     self.ent_time.insert(0, "20")
     add_context_menu(self.ent_time)
 
-    # 8. Кнопка добавления
     self.btn_add = tk.Button(
         main,
         text="➕ Добавить вопрос",
@@ -668,7 +653,6 @@ class TeacherWindow(tk.Toplevel):
     )
     self.btn_add.pack(fill="x", pady=(5, 8))
 
-    # 9. Список вопросов
     tk.Label(
         main, text="Добавленные вопросы:", font=("Segoe UI", 10, "bold")
     ).pack(anchor="w")
@@ -679,7 +663,6 @@ class TeacherWindow(tk.Toplevel):
     self.listbox.pack(fill="both", expand=True, pady=(0, 6))
     self.listbox.bind("<<ListboxSelect>>", self.on_select)
 
-    # 10. Предпросмотр
     tk.Button(
         main,
         text="👁 Предпросмотр теста",
@@ -689,7 +672,6 @@ class TeacherWindow(tk.Toplevel):
         relief="flat",
     ).pack(fill="x", pady=(0, 6))
 
-    # 11. Управление тестом
     ctrl_frame = tk.Frame(main)
     ctrl_frame.pack(fill="x")
 
@@ -977,7 +959,7 @@ class TeacherWindow(tk.Toplevel):
 
 
 # ============================================================
-# Окно предпросмотра теста
+# ОКНО ПРЕДПРОСМОТРА ТЕСТА
 # ============================================================
 class PreviewWindow(tk.Toplevel):
 
@@ -1116,7 +1098,7 @@ class PreviewWindow(tk.Toplevel):
 
 
 # ============================================================
-# Окно ученика
+# ОКНО УЧЕНИКА (ПРОХОЖДЕНИЕ ТЕСТА)
 # ============================================================
 class StudentWindow(tk.Toplevel):
 
@@ -1189,7 +1171,6 @@ class StudentWindow(tk.Toplevel):
         font=("Segoe UI", 9),
     ).pack(pady=10)
 
-    # Экран теста
     self.test_frame = tk.Frame(self, padx=20, pady=10)
 
     self.lbl_title = tk.Label(
@@ -1529,7 +1510,7 @@ class StudentWindow(tk.Toplevel):
 
 
 # ============================================================
-# Окно статистики
+# ОКНО СТАТИСТИКИ
 # ============================================================
 class StatsWindow(tk.Toplevel):
 
@@ -1813,7 +1794,7 @@ class StatsWindow(tk.Toplevel):
 
 
 # ============================================================
-# Запуск программы
+# ТОЧКА ВХОДА
 # ============================================================
 if __name__ == "__main__":
   app = TestApp()
